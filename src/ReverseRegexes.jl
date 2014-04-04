@@ -21,7 +21,7 @@ containstag(tok::RTok, tag) = any(x->hastag(x, tag), tok.args)
 
 const invalid_tags = [:(:any0), :(:more0), :(:opt0), :(:alt0), :(:curly0)]
 
-gtag = ['(' => :group, '[' => :class, '{' => :curly0]
+gtag = ['(' => :group, '[' => :class]
 
 immutable RState{L}
     i::Int
@@ -56,7 +56,7 @@ verbatim(s::RState) = s.tagstack[end] in [:class, :curly0]
 
 checkclosed(s::RState{0}) = error("game over")
 checkclosed(s::RState{1}) = true
-checkclosed(s::RState) = all(x->(x == :curly0), s.tagstack[2:end]) || error("premature end of input")
+checkclosed{L}(s::RState{L}) = error("premature end of input")
 
 function parse_regex_token(pattern::String, state::RState)
     i = state.i
@@ -69,14 +69,18 @@ function parse_regex_token(pattern::String, state::RState)
         done(pattern, i) && return RTok(:char, "\\"), RState(state, i)
         c, i = next(pattern, i)
         return RTok(:char, string("\\", c)), RState(state, i)
-    elseif c in [')', ']', '}']
+    elseif c in [')', ']']
         closes(c, state) && return RTok(:pop), pop(state, i)
         return RTok(:char, string(c)), RState(state, i)
     elseif verbatim(state)
         return RTok(:char, string(c)), RState(state, i)
     elseif c == '|'
         return RTok(:alt0), RState(state, i)
-    elseif c in ['(', '[', '{']
+    elseif c == '{'
+        return RTok(:curlyL), RState(state, i)
+    elseif c == '}'
+        return RTok(:curlyR), RState(state, i)
+    elseif c in ['(', '[']
         t = gtag[c]
         tok = RTok(t)
         l0 = level(state)
@@ -107,6 +111,27 @@ const _tagsymbol = [:any => "*", :more => "+", :opt => "?", :curly => "{...}"]
 tagsymbol(tag::Symbol) = _tagsymbol[tag]
 tagsymbol{T}(regex::RTok{T}) = _tagsymbol[T]
 
+function staged_is_valid(staged::Vector{Any})
+    isempty(staged) && return false
+    hasdigits = false
+    hascomma = false
+    for tok in staged
+        hastag(tok, :char) || return false
+        length(tok.args[1]) == 1 || return false
+        c = tok.args[1][1]
+        if isdigit(c)
+            hasdigits = true
+        elseif c == ','
+            hasdigits || return false
+            hascomma && return false
+            hascomma = true
+        else
+            return false
+        end
+    end
+    return true
+end
+
 for T in [:(:char), :(:sol), :(:eol)]
     @eval postparse_regex(regex::RTok{$T}) = regex
 end
@@ -122,6 +147,24 @@ function postparse_regex(regex::RTok)
         end
         pp = RTok(tag(regex), RTok(:alt, [postparse_regex(RTok(:altgroup, g...)) for g in groups]...))
         return pp
+    end
+    staged = {}
+    iR = 0
+    i = length(regex.args)
+    while i >= 1
+        if hastag(regex.args[i], :curlyR)
+            iR > 0 && (staged = {})
+            iR = i
+        elseif hastag(regex.args[i], :curlyL)
+            if iR > 0 && staged_is_valid(staged)
+                splice!(regex.args, i:iR, [RTok(:curly0, staged...)])
+            end
+            iR = 0
+            staged = {}
+        elseif iR > 0
+            unshift!(staged, regex.args[i])
+        end
+        i -= 1
     end
     i = length(regex.args)
     while i >= 1
@@ -198,6 +241,8 @@ function print(io::IO, regex::RTok{:alt})
 end
 print(io::IO, regex::RTok{:sol}) = print(io, '^')
 print(io::IO, regex::RTok{:eol}) = print(io, '$')
+print(io::IO, regex::RTok{:curlyL}) = print(io, '{')
+print(io::IO, regex::RTok{:curlyR}) = print(io, '}')
 for T in invalid_tags
     @eval print(io::IO, regex::RTok{$T}) = error("invalid tag: " * string($T))
 end
