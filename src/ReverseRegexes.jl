@@ -19,7 +19,8 @@ hastag{T}(::RTok{T}, tag::Vector) = T in tag
 
 containstag(tok::RTok, tag) = any(x->hastag(x, tag), tok.args)
 
-const invalid_tags = [:(:any0), :(:more0), :(:opt0), :(:alt0), :(:curly0)]
+const invalid_tags = [:(:any0), :(:more0), :(:opt0), :(:alt0), :(:curly0),
+                      :(:ng_any0), :(:ng_more0), :(:ng_opt0), :(:ng_curly0)]
 
 gtag = ['(' => :group, '[' => :class]
 
@@ -129,6 +130,7 @@ function parse_regex_token(pattern::String, state::RState)
 end
 
 pptag{T}(regex::RTok{T}) = symbol(string(T)[1:end-1]) # :any0 => :any, :more0 => :more etc.
+pptag_ng{T}(regex::RTok{T}) = symbol("ng_" * string(T)) # :any0 => :ng_any0, :more0 => :ng_more0 etc.
 const _tagsymbol = [:any => "*", :more => "+", :opt => "?", :curly => "{...}"]
 tagsymbol(tag::Symbol) = _tagsymbol[tag]
 tagsymbol{T}(regex::RTok{T}) = _tagsymbol[T]
@@ -190,12 +192,17 @@ function postparse_regex(regex::RTok)
     end
     i = length(regex.args)
     while i >= 1
-        if hastag(regex.args[i], [:any0, :more0, :opt0])
+        if hastag(regex.args[i], [:any0, :ng_any0, :more0, :ng_more0, :opt0, :ng_opt0])
             t = pptag(regex.args[i])
             i > 1 || error("'" * tagsymbol(t) * "' at the beginning of an atom")
-            splice!(regex.args, i-1:i, [postparse_regex(RTok(t, regex.args[i-1]))])
-            i -= 1
-        elseif hastag(regex.args[i], :curly0)
+            if hastag(regex.args[i], :opt0) && hastag(regex.args[i-1], [:any0, :more0, :opt0, :curly0])
+                ngt = pptag_ng(regex.args[i-1])
+                splice!(regex.args, i-1:i, [RTok(ngt, regex.args[i-1].args...)])
+            else
+                splice!(regex.args, i-1:i, [postparse_regex(RTok(t, regex.args[i-1]))])
+                i -= 1
+            end
+        elseif hastag(regex.args[i], [:curly0, :ng_curly0])
             t = pptag(regex.args[i])
             i > 1 || error("'" * tagsymbol(t) * "' at the beginning of an atom")
             curlytarget = RTok(:curlytarget, postparse_regex(regex.args[i-1]))
@@ -236,8 +243,11 @@ print(io::IO, regex::RTok{:regex_tree}) = map(ex->print(io, ex), regex.args)
 print(io::IO, regex::RTok{:altgroup}) = map(ex->print(io, ex), regex.args)
 print(io::IO, regex::RTok{:char}) = print(io, regex.args[1])
 for (T,pre,post) in [(:(:any), "", '*'),
+                     (:(:ng_any), "", "*?"),
                      (:(:more), "", '+'),
+                     (:(:ng_more), "", "+?"),
                      (:(:opt), "", '?'),
+                     (:(:ng_opt), "", "??"),
                      (:(:class), '[', ']'),
                      (:(:group), '(', ')')]
     @eval function print(io::IO, regex::RTok{$T})
@@ -246,13 +256,16 @@ for (T,pre,post) in [(:(:any), "", '*'),
         print(io, $post)
     end
 end
-function print(io::IO, regex::RTok{:curly})
-    @assert hastag(regex.args[1], :curlytarget)
-    @assert hastag(regex.args[2], :curlycontent)
-    map(a->print(io, a), regex.args[1].args)
-    print(io, '{')
-    map(a->print(io, a), regex.args[2].args)
-    print(io, '}')
+for (T,pre,post) in [(:(:curly), '{', '}'),
+                     (:(:ng_curly), '{', "}?")]
+    @eval function print(io::IO, regex::RTok{$T})
+        @assert hastag(regex.args[1], :curlytarget)
+        @assert hastag(regex.args[2], :curlycontent)
+        map(a->print(io, a), regex.args[1].args)
+        print(io, $pre)
+        map(a->print(io, a), regex.args[2].args)
+        print(io, $post)
+    end
 end
 function print(io::IO, regex::RTok{:alt})
     for i = 1:(length(regex.args)-1)
