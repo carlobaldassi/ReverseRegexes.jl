@@ -26,13 +26,15 @@ gtag = ['(' => :group, '[' => :class]
 immutable RState{L}
     i::Int
     tagstack::NTuple{L,Symbol}
+    pclass::Symbol # POSIX-class state (:none -> :brackL -> :colonL -> :colonR)
 end
-RState(pattern::String) = RState{1}(start(pattern), (:root,))
-RState{L}(s::RState{L}, i::Int) = RState{L}(i, s.tagstack)
-RState{L}(s::RState{L}, i::Int, tag::Symbol) = RState{L+1}(i, tuple(s.tagstack..., tag))
-RState{L}(s::RState{L}, tag::Symbol) = RState{L+1}(s.i, tuple(s.tagstack..., tag))
+RState(pattern::String) = RState{1}(start(pattern), (:root,), :none)
+RState{L}(s::RState{L}, i::Int; pclass=s.pclass) = RState{L}(i, s.tagstack, pclass)
+RState{L}(s::RState{L}, i::Int, tag::Symbol) = RState{L+1}(i, tuple(s.tagstack..., tag), :none)
+
 pop(s::RState{0}, i::Int) = error("game over")
-pop{L}(s::RState{L}, i::Int) = RState{L-1}(i, tuple(s.tagstack[1:end-1]...))
+pop{L}(s::RState{L}, i::Int) = RState{L-1}(i, tuple(s.tagstack[1:end-1]...), :none)
+
 level{L}(::RState{L}) = L
 closes(c, s::RState{0}) = error("game over")
 closes(c, s::RState{1}) = error("unmatched $c")
@@ -44,15 +46,31 @@ function closes(c, s::RState)
     elseif c == ']'
         s.tagstack[end] == :class && return true
         error("unmatched $c")
-    elseif c == '}'
-        s.tagstack[end] == :curly0 && return true
-        s.tagstack[end] == :class && return false
-        error("unmatched $c")
+    else
+        error("bug")
     end
 end
-verbatim(s::RState{0}) = error("game over")
-verbatim(s::RState{1}) = false
-verbatim(s::RState) = s.tagstack[end] in [:class, :curly0]
+
+inclass(s::RState{0}) = error("game over")
+inclass(s::RState{1}) = false
+inclass(s::RState) = s.tagstack[end] == :class
+
+function advance_pclass(pclass::Symbol, c::Char)
+    if pclass == :none
+        c == '[' && return :brackL
+        return :none
+    elseif pclass == :brackL
+        c == ':' && return :colonL
+        return :none
+    elseif pclass == :colonL
+        c == ':' && return :colonR
+        return :colonL
+    elseif pclass == :colonR
+        c != ']' && return :none
+        return pclass
+    end
+end
+closes_pclass(pclass::Symbol) = pclass == :colonR
 
 checkclosed(s::RState{0}) = error("game over")
 checkclosed(s::RState{1}) = true
@@ -62,18 +80,22 @@ function parse_regex_token(pattern::String, state::RState)
     i = state.i
     if done(pattern, i)
         checkclosed(state)
-        return RTok(:done), RState(-1, ())
+        return RTok(:done), RState(-1, (), :none)
+        irintln("QUI1")
     end
     c, i = next(pattern, i)
     if c == '\\'
         done(pattern, i) && return RTok(:char, "\\"), RState(state, i)
         c, i = next(pattern, i)
         return RTok(:char, string("\\", c)), RState(state, i)
+    elseif c == ']' && closes_pclass(state.pclass)
+        return RTok(:char, string(c)), RState(state, i, pclass=:none)
     elseif c in [')', ']']
         closes(c, state) && return RTok(:pop), pop(state, i)
         return RTok(:char, string(c)), RState(state, i)
-    elseif verbatim(state)
-        return RTok(:char, string(c)), RState(state, i)
+    elseif inclass(state)
+        pclass = advance_pclass(state.pclass, c)
+        return RTok(:char, string(c)), RState(state, i, pclass=pclass)
     elseif c == '|'
         return RTok(:alt0), RState(state, i)
     elseif c == '{'
